@@ -1,0 +1,14 @@
+{
+  "name": "bucket-budget",
+  "version": "1.0.0",
+  "description": "Virtual envelope budgeting system with visual bucket fill indicators",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "express": "^5.1.0",
+    "plaid": "^41.3.0"
+  }
+}

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bucket Budget</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-content">
+      <div class="header-logo">
+        <span class="header-icon">&#128167;</span>
+        <h1>Bucket Budget</h1>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Balance Section -->
+    <section id="balance-section">
+      <div id="balance-display">
+        <div class="balance-row">
+          <div class="balance-item">
+            <span class="balance-label">Total Balance</span>
+            <span id="total-balance" class="balance-amount">$0.00</span>
+            <button id="edit-balance-btn" class="btn-small">Edit</button>
+          </div>
+          <div class="balance-item">
+            <span class="balance-label">Allocated</span>
+            <span id="total-allocated" class="balance-amount secondary">$0.00</span>
+          </div>
+          <div class="balance-item">
+            <span class="balance-label">Unallocated</span>
+            <span id="unallocated" class="balance-amount accent">$0.00</span>
+          </div>
+        </div>
+      </div>
+      <div id="summary-bar"></div>
+      <!-- Plaid Connection (populated by JS based on status) -->
+      <div id="plaid-section" class="hidden"></div>
+    </section>
+
+    <!-- Bucket Grid -->
+    <section id="buckets-section">
+      <div class="section-header">
+        <h2>Buckets</h2>
+        <div class="section-actions">
+          <button id="log-purchase-btn" class="btn-secondary">Log Purchase</button>
+          <button id="transfer-btn" class="btn-secondary">Transfer</button>
+          <button id="new-bucket-btn" class="btn-primary">+ New Bucket</button>
+        </div>
+      </div>
+      <div id="bucket-grid"></div>
+      <div id="empty-state" class="hidden">
+        <div class="empty-state-icon">&#128176;</div>
+        <p>No buckets yet. Create your first one to start organizing your money!</p>
+      </div>
+    </section>
+
+    <!-- Transaction History -->
+    <section id="transactions-section">
+      <div class="section-header">
+        <h2>Recent Transactions</h2>
+        <div class="section-actions">
+          <button id="manage-rules-btn" class="btn-small">Auto-Assign Rules</button>
+        </div>
+      </div>
+      <div id="transaction-list"></div>
+      <div id="transactions-empty" class="hidden">
+        <p class="empty-hint">No transactions yet. Log a purchase to see it here.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal Overlay -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal" role="dialog" aria-modal="true">
+      <div id="modal-header">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" class="btn-icon">&times;</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Toast container -->
+  <div id="toast-container"></div>
+
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
