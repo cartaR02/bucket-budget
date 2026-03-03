@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version)",
+      "Bash(npm --version)",
+      "Bash(npm view express version)",
+      "Bash(npm install)",
+      "mcp__Claude_Preview__preview_start",
+      "WebFetch(domain:plaid.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(npm install plaid dotenv)",
+      "Bash(node -c server.js)",
+      "Bash(node -c public/app.js)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git init)",
+      "Bash(git add .gitignore server.js package.json package-lock.json public/index.html public/app.js public/style.css)",
+      "Bash(git add .env.example)",
+      "Bash(git commit:*)",
+      "Bash(gh repo create bucket-budget --private --source=. --push --description \"Personal budgeting app with visual bucket system and Plaid integration for automatic credit card transaction syncing\")"
+    ]
+  }
+}
