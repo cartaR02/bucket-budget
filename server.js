@@ -5,12 +5,28 @@ const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
-const PORT = 3000;
-const DATA_FILE = path.join(__dirname, 'data.json');
-const DEFAULT_DATA = { balance: 0, buckets: [], transactions: [], autoAssignRules: [] };
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const DATA_FILE = path.join(DATA_DIR, 'data.json');
+const DEFAULT_DATA = { pools: [], activePoolId: null };
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Service worker must be served with no-cache so updates propagate immediately
+app.get('/service-worker.js', (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'service-worker.js'));
+});
+
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.set('Cache-Control', 'no-cache');
+    } else {
+      res.set('Cache-Control', 'public, max-age=3600');
+    }
+  },
+}));
 
 // --- Plaid (optional) ---
 
@@ -47,13 +63,78 @@ async function readData() {
   try {
     const raw = await fs.readFile(DATA_FILE, 'utf-8');
     const data = JSON.parse(raw);
-    // Backfill for existing data files
-    if (!data.transactions) data.transactions = [];
-    if (!data.autoAssignRules) data.autoAssignRules = [];
-    if (data.plaid) {
-      if (!data.plaid.transactionsCursor) data.plaid.transactionsCursor = '';
-      if (!data.plaid.syncedPlaidTxnIds) data.plaid.syncedPlaidTxnIds = [];
+
+    // --- Migration: old flat format → pools format ---
+    if (!data.pools) {
+      const poolId = generateId();
+      const pool = {
+        id: poolId,
+        name: 'My Budget',
+        type: 'spending',
+        linkedAccountIds: (data.plaid?.accounts || []).map(a => a.id),
+        balance: data.balance || 0,
+        buckets: data.buckets || [],
+        transactions: data.transactions || [],
+        autoAssignRules: data.autoAssignRules || [],
+        createdAt: new Date().toISOString(),
+      };
+
+      const migrated = {
+        pools: [pool],
+        activePoolId: poolId,
+      };
+
+      // Preserve plaid connection
+      if (data.plaid) {
+        migrated.plaid = data.plaid;
+        if (!migrated.plaid.transactionsCursor) migrated.plaid.transactionsCursor = '';
+        if (!migrated.plaid.syncedPlaidTxnIds) migrated.plaid.syncedPlaidTxnIds = [];
+      }
+
+      await writeData(migrated);
+      return migrated;
     }
+
+    // --- Migration: add accumulatedAmount to savings buckets ---
+    let needsWrite = false;
+    for (const pool of data.pools) {
+      if (pool.type === 'savings') {
+        for (const bucket of pool.buckets) {
+          if (bucket.accumulatedAmount === undefined) {
+            bucket.accumulatedAmount = 0;
+            needsWrite = true;
+          }
+        }
+      }
+    }
+    if (needsWrite) await writeData(data);
+
+    // --- Migration: single plaid item → multi-item array ---
+    if (data.plaid && data.plaid.accessToken && !data.plaid.items) {
+      const oldPlaid = data.plaid;
+      data.plaid = {
+        items: [{
+          accessToken: oldPlaid.accessToken,
+          itemId: oldPlaid.itemId,
+          accounts: oldPlaid.accounts || [],
+          transactionsCursor: oldPlaid.transactionsCursor || '',
+          syncedPlaidTxnIds: oldPlaid.syncedPlaidTxnIds || [],
+        }],
+        lastSynced: oldPlaid.lastSynced,
+      };
+      needsWrite = true;
+    }
+
+    // Backfill plaid items fields
+    if (data.plaid?.items) {
+      for (const item of data.plaid.items) {
+        if (!item.transactionsCursor) item.transactionsCursor = '';
+        if (!item.syncedPlaidTxnIds) item.syncedPlaidTxnIds = [];
+      }
+    }
+
+    if (needsWrite) await writeData(data);
+
     return data;
   } catch (err) {
     if (err.code === 'ENOENT') {
@@ -72,8 +153,16 @@ function generateId() {
   return crypto.randomBytes(4).toString('hex');
 }
 
+function getPool(data, poolId) {
+  return data.pools.find(p => p.id === poolId);
+}
+
 function getTotalAllocated(buckets) {
-  return buckets.reduce((sum, b) => sum + b.allocatedAmount, 0);
+  return buckets.reduce((sum, b) => sum + (b.allocatedAmount || 0), 0);
+}
+
+function getTotalPercentage(buckets) {
+  return buckets.reduce((sum, b) => sum + (b.percentage || 0), 0);
 }
 
 function findAutoAssignRule(rules, vendorName) {
@@ -84,14 +173,25 @@ function findAutoAssignRule(rules, vendorName) {
 
 function stripPlaidToken(data) {
   const response = { ...data };
-  if (response.plaid) {
+  if (response.plaid?.items) {
     response.plaid = {
-      linked: true,
-      accounts: data.plaid.accounts || [],
+      linked: data.plaid.items.length > 0,
+      items: data.plaid.items.map(item => ({
+        itemId: item.itemId,
+        accounts: item.accounts || [],
+      })),
+      accounts: data.plaid.items.flatMap(item => item.accounts || []),
       lastSynced: data.plaid.lastSynced,
     };
   }
   return response;
+}
+
+// Middleware to load pool from :poolId param
+function loadPool(req, res, next) {
+  // Pool will be loaded after readData in the route handler
+  req.poolId = req.params.poolId;
+  next();
 }
 
 // --- Routes ---
@@ -106,74 +206,255 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-// Update balance
-app.put('/api/balance', async (req, res) => {
+// --- Pool CRUD ---
+
+// Create pool
+app.post('/api/pools', async (req, res) => {
+  try {
+    const { name, type, linkedAccountIds } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    if (!['spending', 'savings'].includes(type)) {
+      return res.status(400).json({ error: 'Type must be "spending" or "savings"' });
+    }
+
+    const data = await readData();
+    const pool = {
+      id: generateId(),
+      name: name.trim(),
+      type,
+      linkedAccountIds: Array.isArray(linkedAccountIds) ? linkedAccountIds : [],
+      balance: 0,
+      buckets: [],
+      transactions: [],
+      autoAssignRules: [],
+      createdAt: new Date().toISOString(),
+    };
+
+    data.pools.push(pool);
+    data.activePoolId = pool.id;
+    await writeData(data);
+    res.status(201).json(stripPlaidToken(data));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create pool' });
+  }
+});
+
+// Update pool
+app.put('/api/pools/:poolId', async (req, res) => {
+  try {
+    const data = await readData();
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    const { name, linkedAccountIds } = req.body;
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: 'Name cannot be empty' });
+      }
+      pool.name = name.trim();
+    }
+    if (linkedAccountIds !== undefined) {
+      pool.linkedAccountIds = Array.isArray(linkedAccountIds) ? linkedAccountIds : [];
+    }
+
+    await writeData(data);
+    res.json(stripPlaidToken(data));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update pool' });
+  }
+});
+
+// Delete pool
+app.delete('/api/pools/:poolId', async (req, res) => {
+  try {
+    const data = await readData();
+    const idx = data.pools.findIndex(p => p.id === req.params.poolId);
+    if (idx === -1) return res.status(404).json({ error: 'Pool not found' });
+
+    data.pools.splice(idx, 1);
+    if (data.activePoolId === req.params.poolId) {
+      data.activePoolId = data.pools.length > 0 ? data.pools[0].id : null;
+    }
+    await writeData(data);
+    res.json(stripPlaidToken(data));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete pool' });
+  }
+});
+
+// Set active pool
+app.put('/api/pools/:poolId/active', async (req, res) => {
+  try {
+    const data = await readData();
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    data.activePoolId = pool.id;
+    await writeData(data);
+    res.json(stripPlaidToken(data));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to set active pool' });
+  }
+});
+
+// --- Pool-scoped routes ---
+
+// Update balance for a pool
+app.put('/api/pools/:poolId/balance', async (req, res) => {
   try {
     const { balance } = req.body;
     if (typeof balance !== 'number' || balance < 0) {
       return res.status(400).json({ error: 'Balance must be a non-negative number' });
     }
     const data = await readData();
-    data.balance = balance;
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    pool.balance = balance;
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to update balance' });
   }
 });
 
-// Create bucket
-app.post('/api/buckets', async (req, res) => {
+// Log a deposit to a savings pool (income-aware allocation)
+app.post('/api/pools/:poolId/deposit', async (req, res) => {
   try {
-    const { name, targetAmount, allocatedAmount, color } = req.body;
+    const { checkTotal, depositAmount, date, note } = req.body;
 
-    if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ error: 'Name is required' });
+    if (typeof checkTotal !== 'number' || checkTotal <= 0) {
+      return res.status(400).json({ error: 'Check total must be a positive number' });
     }
-    if (typeof targetAmount !== 'number' || targetAmount < 0) {
-      return res.status(400).json({ error: 'Target amount must be a non-negative number' });
+    if (typeof depositAmount !== 'number' || depositAmount <= 0) {
+      return res.status(400).json({ error: 'Deposit amount must be a positive number' });
     }
-    const alloc = typeof allocatedAmount === 'number' ? allocatedAmount : 0;
-    if (alloc < 0) {
-      return res.status(400).json({ error: 'Allocated amount cannot be negative' });
+    if (depositAmount > checkTotal) {
+      return res.status(400).json({ error: 'Deposit amount cannot exceed check total' });
     }
 
     const data = await readData();
-    const unallocated = data.balance - getTotalAllocated(data.buckets);
-    if (alloc > unallocated) {
-      return res.status(400).json({ error: `Not enough unallocated funds. Available: $${unallocated.toFixed(2)}` });
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+    if (pool.type !== 'savings') {
+      return res.status(400).json({ error: 'Deposits are only for savings pools' });
     }
 
-    const bucket = {
+    let remaining = Math.round(depositAmount * 100) / 100;
+    const allocations = [];
+
+    // Priority-based filling: buckets fill in array order
+    for (const bucket of pool.buckets) {
+      if (remaining <= 0) break;
+      const need = Math.round(checkTotal * (bucket.percentage || 0)) / 100;
+      const allocated = Math.round(Math.min(need, remaining) * 100) / 100;
+      if (allocated > 0) {
+        bucket.accumulatedAmount = Math.round(((bucket.accumulatedAmount || 0) + allocated) * 100) / 100;
+        remaining = Math.round((remaining - allocated) * 100) / 100;
+        allocations.push({ bucketId: bucket.id, amount: allocated });
+      }
+    }
+
+    pool.balance = Math.round((pool.balance + depositAmount) * 100) / 100;
+
+    const transaction = {
       id: generateId(),
-      name: name.trim(),
-      targetAmount,
-      allocatedAmount: alloc,
-      color: color || '#4F46E5',
+      type: 'deposit',
+      vendor: 'Deposit',
+      amount: Math.round(depositAmount * 100) / 100,
+      checkTotal: Math.round(checkTotal * 100) / 100,
+      allocations,
+      bucketId: null,
+      note: (note || '').trim(),
+      date: date ? new Date(date).toISOString() : new Date().toISOString(),
       createdAt: new Date().toISOString(),
     };
 
-    data.buckets.push(bucket);
+    pool.transactions.push(transaction);
     await writeData(data);
-    res.status(201).json(data);
+    res.status(201).json(stripPlaidToken(data));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to log deposit' });
+  }
+});
+
+// Create bucket in pool
+app.post('/api/pools/:poolId/buckets', async (req, res) => {
+  try {
+    const data = await readData();
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    const { name, color } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    if (pool.type === 'savings') {
+      // Percentage-based bucket
+      const { percentage } = req.body;
+      if (typeof percentage !== 'number' || percentage <= 0 || percentage > 100) {
+        return res.status(400).json({ error: 'Percentage must be between 1 and 100' });
+      }
+      const used = getTotalPercentage(pool.buckets);
+      if (used + percentage > 100) {
+        return res.status(400).json({ error: `Only ${100 - used}% available` });
+      }
+
+      pool.buckets.push({
+        id: generateId(),
+        name: name.trim(),
+        percentage: Math.round(percentage * 100) / 100,
+        accumulatedAmount: 0,
+        color: color || '#4F46E5',
+        createdAt: new Date().toISOString(),
+      });
+    } else {
+      // Dollar-based bucket (spending)
+      const { targetAmount, allocatedAmount } = req.body;
+      if (typeof targetAmount !== 'number' || targetAmount < 0) {
+        return res.status(400).json({ error: 'Target amount must be a non-negative number' });
+      }
+      const alloc = typeof allocatedAmount === 'number' ? allocatedAmount : 0;
+      if (alloc < 0) {
+        return res.status(400).json({ error: 'Allocated amount cannot be negative' });
+      }
+      const unallocated = pool.balance - getTotalAllocated(pool.buckets);
+      if (alloc > unallocated) {
+        return res.status(400).json({ error: `Not enough unallocated funds. Available: $${unallocated.toFixed(2)}` });
+      }
+
+      pool.buckets.push({
+        id: generateId(),
+        name: name.trim(),
+        targetAmount,
+        allocatedAmount: alloc,
+        color: color || '#4F46E5',
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    await writeData(data);
+    res.status(201).json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to create bucket' });
   }
 });
 
-// Update bucket
-app.put('/api/buckets/:id', async (req, res) => {
+// Update bucket in pool
+app.put('/api/pools/:poolId/buckets/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { name, targetAmount, allocatedAmount, color } = req.body;
-
     const data = await readData();
-    const idx = data.buckets.findIndex(b => b.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'Bucket not found' });
-    }
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
 
-    const bucket = data.buckets[idx];
+    const idx = pool.buckets.findIndex(b => b.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Bucket not found' });
+
+    const bucket = pool.buckets[idx];
+    const { name, color } = req.body;
 
     if (name !== undefined) {
       if (typeof name !== 'string' || !name.trim()) {
@@ -181,57 +462,77 @@ app.put('/api/buckets/:id', async (req, res) => {
       }
       bucket.name = name.trim();
     }
-    if (targetAmount !== undefined) {
-      if (typeof targetAmount !== 'number' || targetAmount < 0) {
-        return res.status(400).json({ error: 'Target amount must be a non-negative number' });
+    if (color !== undefined) bucket.color = color;
+
+    if (pool.type === 'savings') {
+      const { percentage } = req.body;
+      if (percentage !== undefined) {
+        if (typeof percentage !== 'number' || percentage <= 0 || percentage > 100) {
+          return res.status(400).json({ error: 'Percentage must be between 1 and 100' });
+        }
+        const otherPct = getTotalPercentage(pool.buckets) - (bucket.percentage || 0);
+        if (otherPct + percentage > 100) {
+          return res.status(400).json({ error: `Only ${100 - otherPct}% available` });
+        }
+        bucket.percentage = Math.round(percentage * 100) / 100;
       }
-      bucket.targetAmount = targetAmount;
-    }
-    if (allocatedAmount !== undefined) {
-      if (typeof allocatedAmount !== 'number' || allocatedAmount < 0) {
-        return res.status(400).json({ error: 'Allocated amount cannot be negative' });
+    } else {
+      const { targetAmount, allocatedAmount } = req.body;
+      if (targetAmount !== undefined) {
+        if (typeof targetAmount !== 'number' || targetAmount < 0) {
+          return res.status(400).json({ error: 'Target amount must be a non-negative number' });
+        }
+        bucket.targetAmount = targetAmount;
       }
-      const otherAllocated = getTotalAllocated(data.buckets) - bucket.allocatedAmount;
-      const available = data.balance - otherAllocated;
-      if (allocatedAmount > available) {
-        return res.status(400).json({ error: `Not enough unallocated funds. Available: $${available.toFixed(2)}` });
+      if (allocatedAmount !== undefined) {
+        if (typeof allocatedAmount !== 'number' || allocatedAmount < 0) {
+          return res.status(400).json({ error: 'Allocated amount cannot be negative' });
+        }
+        const otherAllocated = getTotalAllocated(pool.buckets) - (bucket.allocatedAmount || 0);
+        const available = pool.balance - otherAllocated;
+        if (allocatedAmount > available) {
+          return res.status(400).json({ error: `Not enough unallocated funds. Available: $${available.toFixed(2)}` });
+        }
+        bucket.allocatedAmount = allocatedAmount;
       }
-      bucket.allocatedAmount = allocatedAmount;
-    }
-    if (color !== undefined) {
-      bucket.color = color;
     }
 
-    data.buckets[idx] = bucket;
+    pool.buckets[idx] = bucket;
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to update bucket' });
   }
 });
 
-// Delete bucket
-app.delete('/api/buckets/:id', async (req, res) => {
+// Delete bucket from pool
+app.delete('/api/pools/:poolId/buckets/:id', async (req, res) => {
   try {
-    const { id } = req.params;
     const data = await readData();
-    const idx = data.buckets.findIndex(b => b.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'Bucket not found' });
-    }
-    data.buckets.splice(idx, 1);
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    const idx = pool.buckets.findIndex(b => b.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Bucket not found' });
+    pool.buckets.splice(idx, 1);
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete bucket' });
   }
 });
 
-// Transfer money between buckets
-app.post('/api/buckets/transfer', async (req, res) => {
+// Transfer money between buckets (spending pools only)
+app.post('/api/pools/:poolId/buckets/transfer', async (req, res) => {
   try {
-    const { fromId, toId, amount } = req.body;
+    const data = await readData();
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+    if (pool.type === 'savings') {
+      return res.status(400).json({ error: 'Transfers are not available for savings pools' });
+    }
 
+    const { fromId, toId, amount } = req.body;
     if (typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ error: 'Transfer amount must be a positive number' });
     }
@@ -239,27 +540,24 @@ app.post('/api/buckets/transfer', async (req, res) => {
       return res.status(400).json({ error: 'Cannot transfer to the same bucket' });
     }
 
-    const data = await readData();
-
-    // "unallocated" is a special virtual source/destination
     if (fromId === 'unallocated') {
-      const unallocated = data.balance - getTotalAllocated(data.buckets);
+      const unallocated = pool.balance - getTotalAllocated(pool.buckets);
       if (amount > unallocated) {
         return res.status(400).json({ error: `Not enough unallocated funds. Available: $${unallocated.toFixed(2)}` });
       }
-      const toBucket = data.buckets.find(b => b.id === toId);
+      const toBucket = pool.buckets.find(b => b.id === toId);
       if (!toBucket) return res.status(404).json({ error: 'Destination bucket not found' });
       toBucket.allocatedAmount += amount;
     } else if (toId === 'unallocated') {
-      const fromBucket = data.buckets.find(b => b.id === fromId);
+      const fromBucket = pool.buckets.find(b => b.id === fromId);
       if (!fromBucket) return res.status(404).json({ error: 'Source bucket not found' });
       if (amount > fromBucket.allocatedAmount) {
         return res.status(400).json({ error: `Insufficient funds in bucket. Available: $${fromBucket.allocatedAmount.toFixed(2)}` });
       }
       fromBucket.allocatedAmount -= amount;
     } else {
-      const fromBucket = data.buckets.find(b => b.id === fromId);
-      const toBucket = data.buckets.find(b => b.id === toId);
+      const fromBucket = pool.buckets.find(b => b.id === fromId);
+      const toBucket = pool.buckets.find(b => b.id === toId);
       if (!fromBucket) return res.status(404).json({ error: 'Source bucket not found' });
       if (!toBucket) return res.status(404).json({ error: 'Destination bucket not found' });
       if (amount > fromBucket.allocatedAmount) {
@@ -269,22 +567,23 @@ app.post('/api/buckets/transfer', async (req, res) => {
       toBucket.allocatedAmount += amount;
     }
 
-    // Round to avoid floating point drift
-    data.buckets.forEach(b => {
-      b.allocatedAmount = Math.round(b.allocatedAmount * 100) / 100;
+    pool.buckets.forEach(b => {
+      if (b.allocatedAmount !== undefined) {
+        b.allocatedAmount = Math.round(b.allocatedAmount * 100) / 100;
+      }
     });
 
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to transfer funds' });
   }
 });
 
-// --- Transaction Routes ---
+// --- Transaction Routes (pool-scoped) ---
 
 // Log a purchase
-app.post('/api/transactions', async (req, res) => {
+app.post('/api/pools/:poolId/transactions', async (req, res) => {
   try {
     const { vendor, amount, bucketId, note, date } = req.body;
 
@@ -296,65 +595,100 @@ app.post('/api/transactions', async (req, res) => {
     }
 
     const data = await readData();
-    const bucket = data.buckets.find(b => b.id === bucketId);
-    if (!bucket) {
-      return res.status(404).json({ error: 'Bucket not found' });
-    }
-    if (amount > bucket.allocatedAmount) {
-      return res.status(400).json({
-        error: `Insufficient funds in "${bucket.name}". Available: $${bucket.allocatedAmount.toFixed(2)}`
-      });
-    }
-    if (amount > data.balance) {
-      return res.status(400).json({
-        error: `Insufficient total balance. Available: $${data.balance.toFixed(2)}`
-      });
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    if (pool.type === 'spending') {
+      const bucket = pool.buckets.find(b => b.id === bucketId);
+      if (!bucket) return res.status(404).json({ error: 'Bucket not found' });
+      if (amount > bucket.allocatedAmount) {
+        return res.status(400).json({
+          error: `Insufficient funds in "${bucket.name}". Available: $${bucket.allocatedAmount.toFixed(2)}`
+        });
+      }
+      if (amount > pool.balance) {
+        return res.status(400).json({
+          error: `Insufficient total balance. Available: $${pool.balance.toFixed(2)}`
+        });
+      }
+      bucket.allocatedAmount = Math.round((bucket.allocatedAmount - amount) * 100) / 100;
+    } else {
+      // Savings: deduct from balance and bucket's accumulated amount
+      if (amount > pool.balance) {
+        return res.status(400).json({
+          error: `Insufficient balance. Available: $${pool.balance.toFixed(2)}`
+        });
+      }
+      if (bucketId) {
+        const bucket = pool.buckets.find(b => b.id === bucketId);
+        if (bucket && bucket.accumulatedAmount !== undefined) {
+          bucket.accumulatedAmount = Math.round(((bucket.accumulatedAmount || 0) - amount) * 100) / 100;
+          if (bucket.accumulatedAmount < 0) bucket.accumulatedAmount = 0;
+        }
+      }
     }
 
-    // Deduct from bucket and balance
-    bucket.allocatedAmount = Math.round((bucket.allocatedAmount - amount) * 100) / 100;
-    data.balance = Math.round((data.balance - amount) * 100) / 100;
+    pool.balance = Math.round((pool.balance - amount) * 100) / 100;
 
     const transaction = {
       id: generateId(),
       vendor: vendor.trim(),
       amount: Math.round(amount * 100) / 100,
-      bucketId,
+      bucketId: bucketId || null,
       note: (note || '').trim(),
       date: date ? new Date(date).toISOString() : new Date().toISOString(),
       createdAt: new Date().toISOString(),
     };
 
-    data.transactions.push(transaction);
+    pool.transactions.push(transaction);
     await writeData(data);
-    res.status(201).json(data);
+    res.status(201).json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to log transaction' });
   }
 });
 
 // Delete a transaction (refunds amount)
-app.delete('/api/transactions/:id', async (req, res) => {
+app.delete('/api/pools/:poolId/transactions/:id', async (req, res) => {
   try {
-    const { id } = req.params;
     const data = await readData();
-    const idx = data.transactions.findIndex(t => t.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'Transaction not found' });
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    const idx = pool.transactions.findIndex(t => t.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Transaction not found' });
+
+    const txn = pool.transactions[idx];
+
+    if (txn.type === 'deposit') {
+      // Reverse deposit: undo each bucket allocation, deduct from balance
+      for (const alloc of (txn.allocations || [])) {
+        const bucket = pool.buckets.find(b => b.id === alloc.bucketId);
+        if (bucket) {
+          bucket.accumulatedAmount = Math.round(((bucket.accumulatedAmount || 0) - alloc.amount) * 100) / 100;
+          if (bucket.accumulatedAmount < 0) bucket.accumulatedAmount = 0;
+        }
+      }
+      pool.balance = Math.round((pool.balance - txn.amount) * 100) / 100;
+      if (pool.balance < 0) pool.balance = 0;
+    } else {
+      // Reverse withdrawal/purchase: refund to balance (and bucket if applicable)
+      if (pool.type === 'spending' && txn.bucketId) {
+        const bucket = pool.buckets.find(b => b.id === txn.bucketId);
+        if (bucket) {
+          bucket.allocatedAmount = Math.round((bucket.allocatedAmount + txn.amount) * 100) / 100;
+        }
+      }
+      if (pool.type === 'savings' && txn.bucketId) {
+        const bucket = pool.buckets.find(b => b.id === txn.bucketId);
+        if (bucket && bucket.accumulatedAmount !== undefined) {
+          bucket.accumulatedAmount = Math.round(((bucket.accumulatedAmount || 0) + txn.amount) * 100) / 100;
+        }
+      }
+      pool.balance = Math.round((pool.balance + txn.amount) * 100) / 100;
     }
 
-    const txn = data.transactions[idx];
-
-    // Refund to bucket (if it still exists) and balance
-    const bucket = data.buckets.find(b => b.id === txn.bucketId);
-    if (bucket) {
-      bucket.allocatedAmount = Math.round((bucket.allocatedAmount + txn.amount) * 100) / 100;
-    }
-    data.balance = Math.round((data.balance + txn.amount) * 100) / 100;
-
-    // Note: we intentionally do NOT remove plaidTransactionId from syncedPlaidTxnIds
-    // so the transaction won't re-import on next Plaid sync
-    data.transactions.splice(idx, 1);
+    pool.transactions.splice(idx, 1);
     await writeData(data);
     res.json(stripPlaidToken(data));
   } catch (err) {
@@ -363,34 +697,32 @@ app.delete('/api/transactions/:id', async (req, res) => {
 });
 
 // Assign an uncategorized transaction to a bucket
-app.put('/api/transactions/:id/assign', async (req, res) => {
+app.put('/api/pools/:poolId/transactions/:id/assign', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { bucketId } = req.body;
-
     const data = await readData();
-    const txn = data.transactions.find(t => t.id === id);
-    if (!txn) {
-      return res.status(404).json({ error: 'Transaction not found' });
-    }
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
 
-    const newBucket = data.buckets.find(b => b.id === bucketId);
-    if (!newBucket) {
-      return res.status(404).json({ error: 'Bucket not found' });
-    }
+    const txn = pool.transactions.find(t => t.id === req.params.id);
+    if (!txn) return res.status(404).json({ error: 'Transaction not found' });
 
-    // If already assigned, refund old bucket first
-    if (txn.bucketId) {
-      const oldBucket = data.buckets.find(b => b.id === txn.bucketId);
-      if (oldBucket) {
-        oldBucket.allocatedAmount = Math.round((oldBucket.allocatedAmount + txn.amount) * 100) / 100;
+    const { bucketId } = req.body;
+    const newBucket = pool.buckets.find(b => b.id === bucketId);
+    if (!newBucket) return res.status(404).json({ error: 'Bucket not found' });
+
+    if (pool.type === 'spending') {
+      // Refund old bucket if assigned
+      if (txn.bucketId) {
+        const oldBucket = pool.buckets.find(b => b.id === txn.bucketId);
+        if (oldBucket) {
+          oldBucket.allocatedAmount = Math.round((oldBucket.allocatedAmount + txn.amount) * 100) / 100;
+        }
       }
+      // Deduct from new bucket
+      newBucket.allocatedAmount = Math.round((newBucket.allocatedAmount - txn.amount) * 100) / 100;
     }
 
-    // Deduct from new bucket (balance was already deducted at import time)
-    newBucket.allocatedAmount = Math.round((newBucket.allocatedAmount - txn.amount) * 100) / 100;
     txn.bucketId = bucketId;
-
     await writeData(data);
     res.json(stripPlaidToken(data));
   } catch (err) {
@@ -398,54 +730,53 @@ app.put('/api/transactions/:id/assign', async (req, res) => {
   }
 });
 
-// --- Auto-Assign Rule Routes ---
+// --- Auto-Assign Rule Routes (pool-scoped) ---
 
-// Create an auto-assign rule
-app.post('/api/auto-assign-rules', async (req, res) => {
+app.post('/api/pools/:poolId/auto-assign-rules', async (req, res) => {
   try {
     const { pattern, bucketId } = req.body;
-
     if (!pattern || typeof pattern !== 'string' || !pattern.trim()) {
       return res.status(400).json({ error: 'Pattern is required' });
     }
 
     const data = await readData();
-    if (!data.buckets.find(b => b.id === bucketId)) {
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    if (!pool.buckets.find(b => b.id === bucketId)) {
       return res.status(404).json({ error: 'Bucket not found' });
     }
 
     const normalized = pattern.trim().toLowerCase();
-    if (data.autoAssignRules.find(r => r.pattern === normalized)) {
+    if (pool.autoAssignRules.find(r => r.pattern === normalized)) {
       return res.status(400).json({ error: 'A rule for this pattern already exists' });
     }
 
-    const rule = {
+    pool.autoAssignRules.push({
       id: generateId(),
       pattern: normalized,
       bucketId,
       createdAt: new Date().toISOString(),
-    };
+    });
 
-    data.autoAssignRules.push(rule);
     await writeData(data);
-    res.status(201).json(data);
+    res.status(201).json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to create rule' });
   }
 });
 
-// Delete an auto-assign rule
-app.delete('/api/auto-assign-rules/:id', async (req, res) => {
+app.delete('/api/pools/:poolId/auto-assign-rules/:id', async (req, res) => {
   try {
-    const { id } = req.params;
     const data = await readData();
-    const idx = data.autoAssignRules.findIndex(r => r.id === id);
-    if (idx === -1) {
-      return res.status(404).json({ error: 'Rule not found' });
-    }
-    data.autoAssignRules.splice(idx, 1);
+    const pool = getPool(data, req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'Pool not found' });
+
+    const idx = pool.autoAssignRules.findIndex(r => r.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Rule not found' });
+    pool.autoAssignRules.splice(idx, 1);
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete rule' });
   }
@@ -453,14 +784,15 @@ app.delete('/api/auto-assign-rules/:id', async (req, res) => {
 
 // --- Plaid Routes ---
 
-// Check if Plaid is configured and linked
 app.get('/api/plaid/status', async (req, res) => {
   try {
     const data = await readData();
+    const items = data.plaid?.items || [];
     res.json({
       configured: !!plaidClient,
-      linked: !!(data.plaid && data.plaid.accessToken),
-      accounts: data.plaid?.accounts || [],
+      linked: items.length > 0,
+      items: items.map(item => ({ itemId: item.itemId, accounts: item.accounts || [] })),
+      accounts: items.flatMap(item => item.accounts || []),
       sandbox: (process.env.PLAID_ENV || 'sandbox') === 'sandbox',
     });
   } catch (err) {
@@ -468,15 +800,16 @@ app.get('/api/plaid/status', async (req, res) => {
   }
 });
 
-// Create link token for Plaid Link
 app.post('/api/plaid/create_link_token', requirePlaid, async (req, res) => {
   try {
+    const host = req.headers.origin || `http://localhost:${PORT}`;
     const response = await plaidClient.linkTokenCreate({
       user: { client_user_id: 'local-user' },
       client_name: 'Bucket Budget',
       products: ['transactions'],
       country_codes: ['US'],
       language: 'en',
+      redirect_uri: `${host}/plaid-oauth-return.html`,
     });
     res.json({ link_token: response.data.link_token });
   } catch (err) {
@@ -485,7 +818,6 @@ app.post('/api/plaid/create_link_token', requirePlaid, async (req, res) => {
   }
 });
 
-// Exchange public token for access token
 app.post('/api/plaid/exchange_token', requirePlaid, async (req, res) => {
   try {
     const { public_token } = req.body;
@@ -493,15 +825,10 @@ app.post('/api/plaid/exchange_token', requirePlaid, async (req, res) => {
       return res.status(400).json({ error: 'public_token is required' });
     }
 
-    const exchangeResponse = await plaidClient.itemPublicTokenExchange({
-      public_token,
-    });
+    const exchangeResponse = await plaidClient.itemPublicTokenExchange({ public_token });
     const { access_token, item_id } = exchangeResponse.data;
 
-    // Fetch accounts to store metadata
-    const accountsResponse = await plaidClient.accountsGet({
-      access_token,
-    });
+    const accountsResponse = await plaidClient.accountsGet({ access_token });
     const accounts = accountsResponse.data.accounts.map(a => ({
       id: a.account_id,
       name: a.name,
@@ -512,22 +839,26 @@ app.post('/api/plaid/exchange_token', requirePlaid, async (req, res) => {
     }));
 
     const data = await readData();
-    data.plaid = {
+    if (!data.plaid) data.plaid = { items: [], lastSynced: null };
+    if (!data.plaid.items) data.plaid.items = [];
+
+    data.plaid.items.push({
       accessToken: access_token,
       itemId: item_id,
       accounts,
-      lastSynced: null,
-    };
+      transactionsCursor: '',
+      syncedPlaidTxnIds: [],
+    });
     await writeData(data);
 
-    res.json({ linked: true, accounts });
+    const allAccounts = data.plaid.items.flatMap(i => i.accounts || []);
+    res.json({ linked: true, accounts: allAccounts });
   } catch (err) {
     console.error('Plaid exchange error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to exchange token' });
   }
 });
 
-// Sandbox quick-setup: create test accounts (1 checking + 1 credit card) without going through Link
 app.post('/api/plaid/sandbox_setup', requirePlaid, async (req, res) => {
   try {
     if ((process.env.PLAID_ENV || 'sandbox') !== 'sandbox') {
@@ -537,230 +868,215 @@ app.post('/api/plaid/sandbox_setup', requirePlaid, async (req, res) => {
     const customConfig = JSON.stringify({
       override_accounts: [
         {
-          type: 'depository',
-          subtype: 'checking',
-          starting_balance: 5000,
-          meta: {
-            name: 'Plaid Checking',
-            official_name: 'Plaid Gold Standard Checking',
-          },
-          numbers: {
-            account: '1111222233330000',
-            ach_routing: '011401533',
-          },
+          type: 'depository', subtype: 'checking', starting_balance: 5000,
+          meta: { name: 'Plaid Checking', official_name: 'Plaid Gold Standard Checking' },
+          numbers: { account: '1111222233330000', ach_routing: '011401533' },
         },
         {
-          type: 'credit',
-          subtype: 'credit card',
-          starting_balance: 1250,
-          meta: {
-            name: 'Plaid Credit Card',
-            official_name: 'Plaid Diamond Credit Card',
-            limit: 10000,
-          },
+          type: 'credit', subtype: 'credit card', starting_balance: 1250,
+          meta: { name: 'Plaid Credit Card', official_name: 'Plaid Diamond Credit Card', limit: 10000 },
         },
       ],
     });
 
-    // Create a sandbox public token with custom accounts
     const sandboxResponse = await plaidClient.sandboxPublicTokenCreate({
-      institution_id: 'ins_109508', // First Platypus Bank (non-OAuth, reliable)
+      institution_id: 'ins_109508',
       initial_products: ['transactions'],
-      options: {
-        override_username: 'user_custom',
-        override_password: customConfig,
-      },
+      options: { override_username: 'user_custom', override_password: customConfig },
     });
 
-    const publicToken = sandboxResponse.data.public_token;
-
-    // Exchange for access token (same as normal flow)
     const exchangeResponse = await plaidClient.itemPublicTokenExchange({
-      public_token: publicToken,
+      public_token: sandboxResponse.data.public_token,
     });
     const { access_token, item_id } = exchangeResponse.data;
 
-    // Fetch accounts
-    const accountsResponse = await plaidClient.accountsGet({
-      access_token,
-    });
+    const accountsResponse = await plaidClient.accountsGet({ access_token });
     const accounts = accountsResponse.data.accounts.map(a => ({
-      id: a.account_id,
-      name: a.name,
-      officialName: a.official_name,
-      type: a.type,
-      subtype: a.subtype,
-      mask: a.mask,
+      id: a.account_id, name: a.name, officialName: a.official_name,
+      type: a.type, subtype: a.subtype, mask: a.mask,
     }));
 
     const data = await readData();
-    data.plaid = {
-      accessToken: access_token,
-      itemId: item_id,
-      accounts,
-      lastSynced: null,
-      transactionsCursor: '',
-      syncedPlaidTxnIds: [],
-    };
+    if (!data.plaid) data.plaid = { items: [], lastSynced: null };
+    if (!data.plaid.items) data.plaid.items = [];
+
+    data.plaid.items.push({
+      accessToken: access_token, itemId: item_id, accounts,
+      transactionsCursor: '', syncedPlaidTxnIds: [],
+    });
     await writeData(data);
 
-    res.json({ linked: true, accounts });
+    const allAccounts = data.plaid.items.flatMap(i => i.accounts || []);
+    res.json({ linked: true, accounts: allAccounts });
   } catch (err) {
     console.error('Sandbox setup error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to set up sandbox accounts' });
   }
 });
 
-// Get stored linked accounts
 app.get('/api/plaid/accounts', requirePlaid, async (req, res) => {
   try {
     const data = await readData();
-    if (!data.plaid?.accessToken) {
+    const items = data.plaid?.items || [];
+    if (items.length === 0) {
       return res.status(400).json({ error: 'No bank account linked' });
     }
-    res.json({ accounts: data.plaid.accounts || [] });
+    const allAccounts = items.flatMap(i => i.accounts || []);
+    res.json({ accounts: allAccounts });
   } catch (err) {
     res.status(500).json({ error: 'Failed to get accounts' });
   }
 });
 
-// Sync balance from Plaid
+// Sync balance — updates each pool based on its linked accounts
 app.post('/api/plaid/sync_balance', requirePlaid, async (req, res) => {
   try {
     const data = await readData();
-    if (!data.plaid?.accessToken) {
+    const items = data.plaid?.items || [];
+    if (items.length === 0) {
       return res.status(400).json({ error: 'No bank account linked' });
     }
 
-    const { account_id } = req.body || {};
+    // Fetch balances from all items
+    const allPlaidAccounts = [];
+    for (const item of items) {
+      const balanceResponse = await plaidClient.accountsGet({
+        access_token: item.accessToken,
+      });
+      const accounts = balanceResponse.data.accounts;
+      allPlaidAccounts.push(...accounts);
 
-    const balanceResponse = await plaidClient.accountsBalanceGet({
-      access_token: data.plaid.accessToken,
-    });
-
-    const accounts = balanceResponse.data.accounts;
-    let targetAccount;
-
-    if (account_id) {
-      targetAccount = accounts.find(a => a.account_id === account_id);
-    } else {
-      targetAccount = accounts.find(a => a.subtype === 'checking')
-        || accounts.find(a => a.type === 'depository')
-        || accounts[0];
+      // Update account metadata for this item
+      item.accounts = accounts.map(a => ({
+        id: a.account_id, name: a.name, officialName: a.official_name,
+        type: a.type, subtype: a.subtype, mask: a.mask,
+      }));
     }
 
-    if (!targetAccount) {
-      return res.status(404).json({ error: 'No accounts found' });
+    // Update each pool's balance based on its linked accounts
+    for (const pool of data.pools) {
+      if (pool.linkedAccountIds.length === 0) continue;
+      let poolBalance = 0;
+      for (const acctId of pool.linkedAccountIds) {
+        const acct = allPlaidAccounts.find(a => a.account_id === acctId);
+        if (acct) {
+          poolBalance += acct.balances.current || 0;
+        }
+      }
+      pool.balance = Math.round(poolBalance * 100) / 100;
     }
 
-    data.balance = Math.round(targetAccount.balances.current * 100) / 100;
     data.plaid.lastSynced = new Date().toISOString();
-    data.plaid.accounts = accounts.map(a => ({
-      id: a.account_id,
-      name: a.name,
-      officialName: a.official_name,
-      type: a.type,
-      subtype: a.subtype,
-      mask: a.mask,
-    }));
-
     await writeData(data);
     res.json(stripPlaidToken(data));
   } catch (err) {
     console.error('Plaid balance sync error:', err.response?.data || err.message);
     if (err.response?.data?.error_code === 'ITEM_LOGIN_REQUIRED') {
-      return res.status(400).json({
-        error: 'Bank connection expired. Please re-link your account.',
-        relink: true,
-      });
+      return res.status(400).json({ error: 'Bank connection expired. Please re-link your account.', relink: true });
     }
     res.status(500).json({ error: 'Failed to sync balance from bank' });
   }
 });
 
-// Sync transactions from Plaid (credit cards + bank accounts)
+// Sync transactions — routes to correct pool by account
 app.post('/api/plaid/sync_transactions', requirePlaid, async (req, res) => {
   try {
     const data = await readData();
-    if (!data.plaid?.accessToken) {
+    const items = data.plaid?.items || [];
+    if (items.length === 0) {
       return res.status(400).json({ error: 'No account linked' });
     }
 
-    let cursor = data.plaid.transactionsCursor || '';
+    // Collect transactions from all items
     const allAdded = [];
     const allModified = [];
     const allRemoved = [];
+    // Track which item owns which synced txn IDs
+    const allSyncedIds = new Set(items.flatMap(i => i.syncedPlaidTxnIds || []));
 
-    // Paginate through all available updates
-    let hasMore = true;
-    while (hasMore) {
-      const syncResponse = await plaidClient.transactionsSync({
-        access_token: data.plaid.accessToken,
-        cursor: cursor,
-        count: 500,
-      });
-      allAdded.push(...syncResponse.data.added);
-      allModified.push(...syncResponse.data.modified);
-      allRemoved.push(...syncResponse.data.removed);
-      hasMore = syncResponse.data.has_more;
-      cursor = syncResponse.data.next_cursor;
+    for (const item of items) {
+      let cursor = item.transactionsCursor || '';
+      let hasMore = true;
+      while (hasMore) {
+        const syncResponse = await plaidClient.transactionsSync({
+          access_token: item.accessToken,
+          cursor, count: 500,
+        });
+        allAdded.push(...syncResponse.data.added);
+        allModified.push(...syncResponse.data.modified);
+        allRemoved.push(...syncResponse.data.removed);
+        hasMore = syncResponse.data.has_more;
+        cursor = syncResponse.data.next_cursor;
+      }
+      item.transactionsCursor = cursor;
+    }
+
+    // Helper: find pool that owns an account ID
+    function findPoolForAccount(accountId) {
+      return data.pools.find(p => p.linkedAccountIds.includes(accountId));
+    }
+
+    // Helper: find the item that owns a transaction ID (for syncedPlaidTxnIds tracking)
+    function findItemForAccount(accountId) {
+      return items.find(item => (item.accounts || []).some(a => a.id === accountId));
     }
 
     // --- Process Removals ---
     let removedCount = 0;
     for (const removed of allRemoved) {
-      const idx = data.transactions.findIndex(t => t.plaidTransactionId === removed.transaction_id);
-      if (idx !== -1) {
-        const txn = data.transactions[idx];
-        if (txn.bucketId) {
-          const bucket = data.buckets.find(b => b.id === txn.bucketId);
-          if (bucket) {
-            bucket.allocatedAmount = Math.round((bucket.allocatedAmount + txn.amount) * 100) / 100;
+      for (const pool of data.pools) {
+        const idx = pool.transactions.findIndex(t => t.plaidTransactionId === removed.transaction_id);
+        if (idx !== -1) {
+          const txn = pool.transactions[idx];
+          if (pool.type === 'spending' && txn.bucketId) {
+            const bucket = pool.buckets.find(b => b.id === txn.bucketId);
+            if (bucket) bucket.allocatedAmount = Math.round((bucket.allocatedAmount + txn.amount) * 100) / 100;
           }
+          pool.balance = Math.round((pool.balance + txn.amount) * 100) / 100;
+          pool.transactions.splice(idx, 1);
+          removedCount++;
+          break;
         }
-        data.balance = Math.round((data.balance + txn.amount) * 100) / 100;
-        data.transactions.splice(idx, 1);
-        removedCount++;
       }
-      const syncedIdx = data.plaid.syncedPlaidTxnIds.indexOf(removed.transaction_id);
-      if (syncedIdx !== -1) data.plaid.syncedPlaidTxnIds.splice(syncedIdx, 1);
+      // Remove from the appropriate item's syncedPlaidTxnIds
+      for (const item of items) {
+        const syncedIdx = (item.syncedPlaidTxnIds || []).indexOf(removed.transaction_id);
+        if (syncedIdx !== -1) { item.syncedPlaidTxnIds.splice(syncedIdx, 1); break; }
+      }
     }
 
     // --- Process Modifications ---
     let modifiedCount = 0;
     for (const modified of allModified) {
-      const existing = data.transactions.find(t => t.plaidTransactionId === modified.transaction_id);
-      if (existing) {
+      for (const pool of data.pools) {
+        const existing = pool.transactions.find(t => t.plaidTransactionId === modified.transaction_id);
+        if (!existing) continue;
+
         // Refund old amount
-        if (existing.bucketId) {
-          const bucket = data.buckets.find(b => b.id === existing.bucketId);
-          if (bucket) {
-            bucket.allocatedAmount = Math.round((bucket.allocatedAmount + existing.amount) * 100) / 100;
-          }
+        if (pool.type === 'spending' && existing.bucketId) {
+          const bucket = pool.buckets.find(b => b.id === existing.bucketId);
+          if (bucket) bucket.allocatedAmount = Math.round((bucket.allocatedAmount + existing.amount) * 100) / 100;
         }
-        data.balance = Math.round((data.balance + existing.amount) * 100) / 100;
+        pool.balance = Math.round((pool.balance + existing.amount) * 100) / 100;
 
         // Apply new amount
         const newAmount = Math.round(Math.abs(modified.amount) * 100) / 100;
         const newVendor = modified.merchant_name || modified.name || existing.vendor;
-
-        // Re-run auto-assign with new vendor name
-        const matchedRule = findAutoAssignRule(data.autoAssignRules, newVendor);
+        const matchedRule = findAutoAssignRule(pool.autoAssignRules, newVendor);
         const newBucketId = matchedRule ? matchedRule.bucketId : existing.bucketId;
 
-        if (newBucketId) {
-          const bucket = data.buckets.find(b => b.id === newBucketId);
-          if (bucket) {
-            bucket.allocatedAmount = Math.round((bucket.allocatedAmount - newAmount) * 100) / 100;
-          }
+        if (pool.type === 'spending' && newBucketId) {
+          const bucket = pool.buckets.find(b => b.id === newBucketId);
+          if (bucket) bucket.allocatedAmount = Math.round((bucket.allocatedAmount - newAmount) * 100) / 100;
         }
-        data.balance = Math.round((data.balance - newAmount) * 100) / 100;
+        pool.balance = Math.round((pool.balance - newAmount) * 100) / 100;
 
         existing.vendor = newVendor;
         existing.amount = newAmount;
         existing.bucketId = newBucketId;
         existing.date = new Date(modified.date).toISOString();
         modifiedCount++;
+        break;
       }
     }
 
@@ -769,36 +1085,29 @@ app.post('/api/plaid/sync_transactions', requirePlaid, async (req, res) => {
     let autoAssignedCount = 0;
 
     for (const added of allAdded) {
-      // Skip if already imported (dedup)
-      if (data.plaid.syncedPlaidTxnIds.includes(added.transaction_id)) continue;
-      // Skip pending transactions (they'll settle later)
+      if (allSyncedIds.has(added.transaction_id)) continue;
       if (added.pending) continue;
-      // Plaid: positive amount = money out (purchase), negative = money in (refund/payment)
-      // Only import purchases (positive amounts)
       if (added.amount <= 0) continue;
+
+      const pool = findPoolForAccount(added.account_id);
+      if (!pool) continue; // Skip transactions for unlinked accounts
 
       const amount = Math.round(Math.abs(added.amount) * 100) / 100;
       const vendor = added.merchant_name || added.name || 'Unknown';
 
-      // Run auto-assign rules
-      const matchedRule = findAutoAssignRule(data.autoAssignRules, vendor);
+      const matchedRule = findAutoAssignRule(pool.autoAssignRules, vendor);
       const bucketId = matchedRule ? matchedRule.bucketId : null;
       if (matchedRule) autoAssignedCount++;
 
-      // Deduct from bucket (if matched) and balance
-      if (bucketId) {
-        const bucket = data.buckets.find(b => b.id === bucketId);
-        if (bucket) {
-          bucket.allocatedAmount = Math.round((bucket.allocatedAmount - amount) * 100) / 100;
-        }
+      if (pool.type === 'spending' && bucketId) {
+        const bucket = pool.buckets.find(b => b.id === bucketId);
+        if (bucket) bucket.allocatedAmount = Math.round((bucket.allocatedAmount - amount) * 100) / 100;
       }
-      data.balance = Math.round((data.balance - amount) * 100) / 100;
+      pool.balance = Math.round((pool.balance - amount) * 100) / 100;
 
-      data.transactions.push({
+      pool.transactions.push({
         id: generateId(),
-        vendor,
-        amount,
-        bucketId,
+        vendor, amount, bucketId,
         note: '',
         date: new Date(added.date).toISOString(),
         createdAt: new Date().toISOString(),
@@ -807,55 +1116,83 @@ app.post('/api/plaid/sync_transactions', requirePlaid, async (req, res) => {
         plaidAccountId: added.account_id,
       });
 
-      data.plaid.syncedPlaidTxnIds.push(added.transaction_id);
+      // Add to the correct item's syncedPlaidTxnIds
+      const ownerItem = findItemForAccount(added.account_id);
+      if (ownerItem) ownerItem.syncedPlaidTxnIds.push(added.transaction_id);
+      allSyncedIds.add(added.transaction_id);
       addedCount++;
     }
 
-    // Update cursor and timestamp
-    data.plaid.transactionsCursor = cursor;
     data.plaid.lastSynced = new Date().toISOString();
     await writeData(data);
 
     const response = stripPlaidToken(data);
     response.syncSummary = {
-      added: addedCount,
-      modified: modifiedCount,
-      removed: removedCount,
-      autoAssigned: autoAssignedCount,
-      uncategorized: addedCount - autoAssignedCount,
+      added: addedCount, modified: modifiedCount, removed: removedCount,
+      autoAssigned: autoAssignedCount, uncategorized: addedCount - autoAssignedCount,
     };
     res.json(response);
   } catch (err) {
     console.error('Plaid transaction sync error:', err.response?.data || err.message);
     if (err.response?.data?.error_code === 'ITEM_LOGIN_REQUIRED') {
-      return res.status(400).json({
-        error: 'Bank connection expired. Please re-link your account.',
-        relink: true,
-      });
+      return res.status(400).json({ error: 'Bank connection expired. Please re-link your account.', relink: true });
     }
     res.status(500).json({ error: 'Failed to sync transactions from bank' });
   }
 });
 
-// Disconnect bank account
+// Disconnect bank account (specific item or all)
 app.delete('/api/plaid/disconnect', requirePlaid, async (req, res) => {
   try {
     const data = await readData();
-    if (data.plaid?.accessToken) {
+    const targetItemId = req.query.itemId;
+    const items = data.plaid?.items || [];
+
+    if (targetItemId) {
+      // Disconnect a specific institution
+      const itemIdx = items.findIndex(i => i.itemId === targetItemId);
+      if (itemIdx === -1) return res.status(404).json({ error: 'Item not found' });
+
+      const item = items[itemIdx];
       try {
-        await plaidClient.itemRemove({ access_token: data.plaid.accessToken });
+        await plaidClient.itemRemove({ access_token: item.accessToken });
       } catch (plaidErr) {
         console.error('Plaid itemRemove error:', plaidErr.response?.data || plaidErr.message);
       }
+
+      // Remove linked account IDs for this item's accounts from all pools
+      const removedAccountIds = new Set((item.accounts || []).map(a => a.id));
+      for (const pool of data.pools) {
+        pool.linkedAccountIds = pool.linkedAccountIds.filter(id => !removedAccountIds.has(id));
+      }
+
+      items.splice(itemIdx, 1);
+    } else {
+      // Disconnect all
+      for (const item of items) {
+        try {
+          await plaidClient.itemRemove({ access_token: item.accessToken });
+        } catch (plaidErr) {
+          console.error('Plaid itemRemove error:', plaidErr.response?.data || plaidErr.message);
+        }
+      }
+      data.plaid.items = [];
+      for (const pool of data.pools) {
+        pool.linkedAccountIds = [];
+      }
     }
-    delete data.plaid;
+
+    if (data.plaid.items.length === 0) {
+      delete data.plaid;
+    }
+
     await writeData(data);
-    res.json(data);
+    res.json(stripPlaidToken(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to disconnect bank account' });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Bucket Budget running at http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Bucket Budget running at http://0.0.0.0:${PORT}`);
 });

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bucket Budget — Connecting...</title>
+  <style>
+    body {
+      background: #0f1923;
+      color: #e0e0e0;
+      font-family: 'Inter', sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .msg { text-align: center; font-size: 1.1rem; }
+  </style>
+</head>
+<body>
+  <div class="msg">Finishing bank connection...</div>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <script>
+    // Plaid redirects here after OAuth — we need to re-initialize Link
+    // with the same link_token to finish the flow
+    const linkToken = localStorage.getItem('plaid_link_token');
+    if (linkToken) {
+      const handler = Plaid.create({
+        token: linkToken,
+        receivedRedirectUri: window.location.href,
+        onSuccess: async (publicToken, metadata) => {
+          try {
+            const res = await fetch('/api/plaid/exchange_token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ public_token: publicToken, metadata }),
+            });
+            if (res.ok) {
+              // Go back to the main app
+              window.location.href = '/';
+            } else {
+              document.querySelector('.msg').textContent = 'Connection failed. Redirecting...';
+              setTimeout(() => window.location.href = '/', 2000);
+            }
+          } catch (err) {
+            document.querySelector('.msg').textContent = 'Connection failed. Redirecting...';
+            setTimeout(() => window.location.href = '/', 2000);
+          }
+        },
+        onExit: () => {
+          window.location.href = '/';
+        },
+      });
+      handler.open();
+    } else {
+      document.querySelector('.msg').textContent = 'Session expired. Redirecting...';
+      setTimeout(() => window.location.href = '/', 2000);
+    }
+  </script>
+</body>
+</html>

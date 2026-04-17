@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "bucket-budget",
-      "runtimeExecutable": "node",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
       "runtimeArgs": ["server.js"],
       "port": 3000
     }

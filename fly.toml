@@ -1,0 +1,23 @@
+app = 'bucket-budget'
+primary_region = 'iad'
+
+[build]
+
+[env]
+  PORT = '3000'
+  DATA_DIR = '/data'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+[mounts]
+  source = 'bucket_data'
+  destination = '/data'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'
