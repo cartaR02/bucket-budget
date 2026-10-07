@@ -1,6 +1,6 @@
-const CACHE_NAME = 'bucket-budget-v10';
+const CACHE_NAME = 'bucket-budget-v24';
 
-// v10: Multi-bank account support
+// v24: Lock screen, Plaid reconnect, date and overdrawn-bucket fixes
 
 self.addEventListener('install', () => {
   self.skipWaiting();

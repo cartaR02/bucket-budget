@@ -112,6 +112,10 @@ header::before {
   margin: 0 auto;
   position: relative;
   z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
 .header-logo {
@@ -212,6 +216,29 @@ main {
 
 .pool-tab.active .pool-tab-badge {
   background: rgba(181, 90, 48, 0.15);
+}
+
+.pool-tab-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0.3rem;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0.15rem;
+  transition: all var(--transition-fast);
+}
+
+.pool-tab-edit:hover {
+  color: var(--primary-from);
+  background: rgba(181, 90, 48, 0.1);
+}
+
+.pool-tab-edit svg {
+  width: 0.85em;
+  height: 0.85em;
+  display: block;
 }
 
 .pool-tab-add {
@@ -386,6 +413,11 @@ main {
   transform: translateY(-2px);
 }
 
+/* Overdrawn bucket (negative balance) */
+.bucket-card.overdrawn {
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
 .bucket-card-header {
   display: flex;
   justify-content: space-between;
@@ -426,6 +458,10 @@ main {
   font-weight: 600;
   font-family: var(--font-display);
   letter-spacing: -0.01em;
+}
+
+.bucket-amounts strong.amount-negative {
+  color: var(--color-danger);
 }
 
 /* --- Bucket Visual (warm ceramic vessel) --- */
@@ -693,6 +729,458 @@ main {
   color: var(--primary-from);
 }
 
+.swipe-action-income {
+  color: var(--color-success, #2f855a);
+}
+
+.swipe-action-transfer {
+  color: var(--primary-from);
+}
+
+/* --- Transaction row swipe wrapper --- */
+.txn-swipe {
+  margin-bottom: 0.35rem;
+  border-radius: 10px;
+}
+
+.txn-swipe .swipe-actions-right {
+  border-radius: 0 10px 10px 0;
+}
+
+.txn-swipe-content {
+  padding: 0;
+  background: var(--bg-card-solid);
+  border-radius: 10px;
+}
+
+.txn-swipe-content .txn-row {
+  margin-bottom: 0;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+}
+
+.txn-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+}
+
+.txn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.15rem 0.4rem;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+.txn-tag-income {
+  background: rgba(47, 133, 90, 0.1);
+  color: var(--color-success, #2f855a);
+}
+
+.txn-tag-transfer {
+  background: rgba(181, 90, 48, 0.1);
+  color: var(--primary-from);
+}
+
+.txn-tag svg {
+  width: 0.85em;
+  height: 0.85em;
+}
+
+/* --- Income slider --- */
+#income-slider {
+  width: 100%;
+  accent-color: var(--primary-from);
+  margin: 0.4rem 0;
+}
+
+.income-slider-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  color: var(--text-primary);
+}
+
+.income-slider-hint {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+/* --- Transaction filter tabs --- */
+.txn-filter-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0 0 0.6rem 0;
+  padding: 0.25rem;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 10px;
+}
+
+.txn-filter-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.txn-filter-tab:hover {
+  color: var(--text-primary);
+}
+
+.txn-filter-tab.active {
+  background: var(--bg-card-solid);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.txn-filter-count {
+  display: inline-block;
+  min-width: 1.3em;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.txn-filter-tab.active .txn-filter-count {
+  background: rgba(181, 90, 48, 0.12);
+  color: var(--primary-from);
+}
+
+/* --- Split bar (Mark Income modal) --- */
+.split-quick-fill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0 0.6rem 0;
+  padding: 0.4rem 0.5rem;
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 8px;
+}
+
+.split-quick-fill-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-right: 0.2rem;
+}
+
+.split-quick-btn {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid rgba(181, 90, 48, 0.25);
+  background: #fff;
+  color: var(--primary-from);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.split-quick-btn:hover {
+  background: rgba(181, 90, 48, 0.08);
+  border-color: var(--primary-from);
+}
+
+.split-quick-btn:active {
+  transform: translateY(1px);
+}
+
+.split-quick-clear {
+  color: var(--text-tertiary);
+  border-color: rgba(0, 0, 0, 0.12);
+  margin-left: auto;
+}
+
+.split-quick-clear:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-primary);
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.split-bar-hint {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  margin: 0 0 0.5rem 0;
+  text-align: center;
+}
+
+.split-bar {
+  position: relative;
+  height: 80px;
+  margin: 0.5rem 0.75rem 1rem 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.split-bar-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+
+.split-seg {
+  position: absolute;
+  top: 50%;
+  height: 6px;
+  border-radius: 3px;
+  transform: translateY(-50%);
+  pointer-events: none;
+  transition: background 0.18s ease;
+}
+
+.split-seg.assigned {
+  background: linear-gradient(90deg, var(--primary-from), rgba(181, 90, 48, 0.75));
+}
+
+.split-seg.unassigned {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.split-dot {
+  position: absolute;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid var(--primary-from);
+  transform: translateY(-50%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  z-index: 2;
+  transition: transform 0.12s ease;
+}
+
+.split-dot.draggable {
+  cursor: grab;
+}
+
+.split-dot.draggable:active {
+  cursor: grabbing;
+  transform: translateY(-50%) scale(1.2);
+}
+
+.split-dot.fixed {
+  background: var(--primary-from);
+  border-color: var(--primary-from);
+}
+
+.split-dot-value {
+  position: absolute;
+  top: -2.1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05rem;
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  pointer-events: none;
+  line-height: 1.1;
+}
+
+.split-dot-pct {
+  font-size: 0.58rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+.split-dot.fixed .split-dot-value {
+  color: var(--primary-from);
+}
+
+.split-dot.fixed .split-dot-pct {
+  color: rgba(181, 90, 48, 0.65);
+}
+
+/* Segment list */
+#split-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.split-segment-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  background: var(--bg-input);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  transition: all var(--transition-fast);
+}
+
+.split-segment-row.assigned {
+  border-color: rgba(181, 90, 48, 0.3);
+  background: rgba(181, 90, 48, 0.03);
+}
+
+.split-segment-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.split-segment-row.assigned .split-segment-dot {
+  background: var(--primary-from);
+}
+
+.split-segment-amount {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  min-width: 5em;
+  flex-shrink: 0;
+  line-height: 1.1;
+}
+
+.split-segment-pct {
+  font-family: var(--font-body);
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+.split-segment-row.assigned .split-segment-pct {
+  color: var(--primary-from);
+}
+
+.split-segment-bucket {
+  flex: 1;
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+}
+
+.split-remove {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 50%;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.split-remove:hover {
+  background: var(--color-danger, #d04b4b);
+  color: white;
+}
+
+.split-remove-spacer {
+  width: 26px;
+  flex-shrink: 0;
+}
+
+/* --- Bucket top-off button --- */
+.bucket-topoff-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0.3rem 0 0.1rem 0;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid rgba(181, 90, 48, 0.25);
+  background: rgba(181, 90, 48, 0.06);
+  color: var(--primary-from);
+  border-radius: 999px;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.bucket-topoff-btn:hover {
+  background: rgba(181, 90, 48, 0.14);
+  border-color: var(--primary-from);
+}
+
+.bucket-topoff-btn:active {
+  transform: translateY(1px);
+}
+
+.bucket-topoff-btn.partial {
+  border-color: rgba(200, 140, 30, 0.35);
+  color: #b4730f;
+  background: rgba(200, 140, 30, 0.08);
+}
+
+.bucket-topoff-btn svg {
+  width: 0.85em;
+  height: 0.85em;
+}
+
+/* --- Tax bucket badge --- */
+.bucket-tax-badge {
+  font-family: var(--font-body);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(47, 133, 90, 0.12);
+  color: var(--color-success, #2f855a);
+  line-height: 1;
+  margin-left: 0.35rem;
+}
+
 .swipe-actions-trigger {
   position: absolute;
   top: 0.75rem;
@@ -906,12 +1394,26 @@ main {
   to { opacity: 1; }
 }
 
+/* Lock screen: hides the app and can't be dismissed */
+#modal-overlay.locked {
+  background: var(--bg-body);
+}
+
+#modal-overlay.locked #modal-close {
+  display: none;
+}
+
 #modal {
   background: #FFFFFF;
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: var(--radius-modal);
   width: 90%;
   max-width: 460px;
+  /* Fit short viewports (landscape phones, long account lists): the body scrolls instead */
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  display: flex;
+  flex-direction: column;
   box-shadow: var(--shadow-modal);
   overflow: hidden;
   animation: modal-in 0.25s cubic-bezier(0.22, 0.61, 0.36, 1);
@@ -924,6 +1426,7 @@ main {
 
 #modal-header {
   display: flex;
+  flex-shrink: 0;
   justify-content: space-between;
   align-items: center;
   padding: 1.25rem 1.75rem;
@@ -940,7 +1443,9 @@ main {
 
 #modal-body {
   padding: 1.75rem;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* --- Modal Text Classes (used by app.js) --- */
@@ -1044,6 +1549,22 @@ main {
   font-size: 0.75rem;
   margin-top: 0.4rem;
   min-height: 1.1em;
+}
+
+/* Checkbox + text on one line (kept out of .form-group, whose inputs are full width) */
+.form-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.form-check input {
+  accent-color: var(--primary-from);
+  flex-shrink: 0;
 }
 
 /* --- Empty State --- */
@@ -1325,6 +1846,28 @@ main {
 .txn-bucket.deleted {
   color: var(--text-tertiary);
   font-style: italic;
+  gap: 0.35rem;
+}
+
+.txn-bucket.deleted .btn-assign {
+  font-style: normal;
+}
+
+/* Bucket chip on categorized rows — tap to move to another bucket */
+.txn-bucket-btn {
+  background: rgba(0, 0, 0, 0.03);
+  border: none;
+  border-radius: var(--radius-button-pill);
+  padding: 0.15rem 0.5rem;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.txn-bucket-btn:hover {
+  background: rgba(181, 90, 48, 0.1);
+  color: var(--primary-from);
 }
 
 .txn-date {
@@ -1437,16 +1980,6 @@ main {
   padding: 0.25rem 0 0.25rem 1rem;
 }
 
-.plaid-account-row .btn-disconnect {
-  margin-left: auto;
-  opacity: 0.5;
-  font-size: 0.7rem;
-}
-
-.plaid-account-row .btn-disconnect:hover {
-  opacity: 1;
-}
-
 .plaid-account-icon {
   font-size: 0.8rem;
 }
@@ -1463,6 +1996,55 @@ main {
   background: rgba(181, 90, 48, 0.06);
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
+}
+
+.plaid-item-group + .plaid-item-group {
+  margin-top: 0.35rem;
+}
+
+.plaid-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0;
+}
+
+.plaid-item-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.plaid-item-header .btn-disconnect {
+  margin-left: auto;
+  opacity: 0.5;
+  font-size: 0.7rem;
+}
+
+.plaid-item-header .btn-disconnect:hover {
+  opacity: 1;
+}
+
+.plaid-item-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.1rem 0 0.25rem 1rem;
+  font-size: 0.7rem;
+  color: var(--color-danger);
+}
+
+.plaid-connected-dot.attention {
+  background: var(--color-danger);
+  box-shadow: 0 0 6px rgba(220, 38, 38, 0.4);
+  animation: none;
+}
+
+.plaid-attention {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-danger);
 }
 
 /* --- Plaid Transaction Badge --- */
@@ -1675,6 +2257,119 @@ main {
   line-height: 1.3;
 }
 
+/* --- Linked Account Checkboxes (in pool modal) --- */
+
+.account-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.account-link-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.account-link-item:hover {
+  border-color: rgba(181, 90, 48, 0.2);
+  background: rgba(181, 90, 48, 0.03);
+}
+
+.account-link-item.selected {
+  border-color: var(--primary-from);
+  background: rgba(181, 90, 48, 0.05);
+  box-shadow: 0 0 0 1px var(--primary-from);
+}
+
+.account-link-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  margin: 0;
+}
+
+.account-link-checkbox {
+  accent-color: var(--primary-from);
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+}
+
+.account-link-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-link-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-link-type {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+.account-balance-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1;
+  transition: all var(--transition-fast);
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.account-balance-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.account-balance-toggle:has(input:checked) {
+  background: rgba(47, 133, 90, 0.14);
+  color: var(--color-success, #2f855a);
+  box-shadow: inset 0 0 0 1px var(--color-success, #2f855a);
+}
+
+.account-balance-toggle:has(input:disabled) {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 /* --- Percentage Bucket Badge --- */
 
 .bucket-pct-badge {
@@ -1826,7 +2521,8 @@ main {
     top: 0.4rem;
   }
 
-  .plaid-account-row {
+  .plaid-account-row,
+  .plaid-item-error {
     padding-left: 0.4rem;
   }
 }

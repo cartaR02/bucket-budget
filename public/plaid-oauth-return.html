@@ -6,8 +6,8 @@
   <title>Bucket Budget — Connecting...</title>
   <style>
     body {
-      background: #0f1923;
-      color: #e0e0e0;
+      background: #F8F6F1;
+      color: #1A1614;
       font-family: 'Inter', sans-serif;
       display: flex;
       align-items: center;
@@ -25,19 +25,29 @@
     // Plaid redirects here after OAuth — we need to re-initialize Link
     // with the same link_token to finish the flow
     const linkToken = localStorage.getItem('plaid_link_token');
+    // Set when re-authenticating an existing bank (update mode): its token must not be exchanged
+    const updateItemId = localStorage.getItem('plaid_update_item_id');
     if (linkToken) {
       const handler = Plaid.create({
         token: linkToken,
         receivedRedirectUri: window.location.href,
         onSuccess: async (publicToken, metadata) => {
           try {
-            const res = await fetch('/api/plaid/exchange_token', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ public_token: publicToken, metadata }),
-            });
-            if (res.ok) {
-              // Go back to the main app
+            const res = updateItemId
+              ? await fetch(`/api/plaid/items/${encodeURIComponent(updateItemId)}/reconnected`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                })
+              : await fetch('/api/plaid/exchange_token', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ public_token: publicToken, metadata }),
+                });
+            localStorage.removeItem('plaid_update_item_id');
+            // A brand-new bank belongs to no pool yet; the app prompts for one on load
+            if (res.ok && !updateItemId) localStorage.setItem('plaid_just_linked', '1');
+            if (res.ok || res.status === 401) {
+              // Go back to the main app (it asks for the password if the session expired)
               window.location.href = '/';
             } else {
               document.querySelector('.msg').textContent = 'Connection failed. Redirecting...';
@@ -49,6 +59,7 @@
           }
         },
         onExit: () => {
+          localStorage.removeItem('plaid_update_item_id');
           window.location.href = '/';
         },
       });
